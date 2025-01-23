@@ -4,7 +4,7 @@
  
 Advanced serverless configuration merger with nested file support and section-based imports.
 
-## Why?
+## Why? 
 Serverless Framework provides basic file importing capabilities but lacks advanced merge strategies. This tool enables:
 - Merging multiple configuration files
 - Section-based imports
