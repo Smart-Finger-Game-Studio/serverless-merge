@@ -1,4 +1,6 @@
+
 # serverless-merge
+[![npm version](https://badge.fury.io/js/%40smartfinger%2Fserverless-merge.svg)](https://www.npmjs.com/package/@smartfinger/serverless-merge)
 
 Advanced serverless configuration merger with nested file support and section-based imports.
 
