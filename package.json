@@ -1,6 +1,6 @@
 {
   "name": "@smartfinger/serverless-merge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Advanced serverless configuration merger with nested file support",
   "license": "MIT",
   "repository": {
