@@ -1,0 +1,5 @@
+handler: src/auth.handler
+events:
+  - http:
+      path: /auth
+      method: post

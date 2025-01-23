@@ -1,0 +1,4 @@
+auth:
+  merge: ${file(functions/auth.yml)}
+
+merge: ${file(functions/api.yml)}

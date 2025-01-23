@@ -1,0 +1,19 @@
+service: test-service
+
+provider:
+  merge: ${file(./subymls/provider.yml)}
+
+functions:
+  merge: ${file(./subymls/functions.yml)}
+
+custom:
+  merge:
+    - ${file(./subymls/custom/base.yml)}
+    - ${file(./subymls/custom/stage.yml)}
+
+resources:
+  Resources:
+    merge: ${file(./subymls/resources.yml):Resources}
+
+  Outputs:
+    $<<: ${file(./subymls/resources.yml):outputs}

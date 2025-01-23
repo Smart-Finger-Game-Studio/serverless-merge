@@ -1,0 +1,9 @@
+.git
+.github
+.gitignore
+.editorconfig
+test/
+*.test.js
+coverage/
+.nyc_output/
+node_modules/

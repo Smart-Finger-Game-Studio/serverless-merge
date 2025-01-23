@@ -1,0 +1,6 @@
+api:
+  handler: src/api.handler
+  events:
+    - http:
+        path: /api
+        method: get

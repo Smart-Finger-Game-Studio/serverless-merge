@@ -1,0 +1,9 @@
+Resources:
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:custom.tableName}
+
+outputs:
+  TableName:
+    Value: ${self:custom.tableName}

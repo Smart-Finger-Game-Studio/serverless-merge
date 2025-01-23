@@ -1,0 +1,754 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Content>
+    <src>
+        <merge_js>#!/usr/bin/env node
+
+const fs = require(&apos;fs&apos;);
+const path = require(&apos;path&apos;);
+const yaml = require(&apos;js-yaml&apos;);
+const { EOL } = require(&apos;os&apos;);
+const parseArgs = require(&apos;minimist&apos;);
+const { CLOUDFORMATION_SCHEMA } = require(&apos;js-yaml-cloudformation-schema&apos;);
+
+class YamlMergeError extends Error {
+  constructor(message, filePath, originalError = null) {
+    super(message);
+    this.name = &apos;YamlMergeError&apos;;
+    this.filePath = filePath;
+    this.originalError = originalError;
+  }
+}
+
+class Logger {
+  constructor(level = &apos;info&apos;) {
+    this.level = level;
+    this.levels = {
+      error: 0,
+      warn: 1,
+      info: 2,
+      debug: 3
+    };
+  }
+
+  log(level, message, ...args) {
+    if (this.levels[level] &lt;= this.levels[this.level]) {
+      console.log(`[${level.toUpperCase()}]`, message, ...args);
+    }
+  }
+
+  error(message, ...args) { this.log(&apos;error&apos;, message, ...args); }
+  warn(message, ...args) { this.log(&apos;warn&apos;, message, ...args); }
+  info(message, ...args) { this.log(&apos;info&apos;, message, ...args); }
+  debug(message, ...args) { this.log(&apos;debug&apos;, message, ...args); }
+}
+
+class YamlLine {
+  constructor(raw) {
+    this.raw = raw;
+    this.indent = this.calculateIndent(raw);
+    this.content = raw.trim();
+    this.isComment = this.content.startsWith(&apos;#&apos;);
+    this.isEmpty = this.content === &apos;&apos;;
+    this.hasTag = this.content.startsWith(&apos;!&apos;);
+    this.hasCloudFormation = this.content.includes(&apos;Fn::&apos;) || this.content.includes(&apos;!Ref&apos;);
+    this.key = this.extractKey(this.content);
+    this.isList = this.content.startsWith(&apos;-&apos;);
+    this.indentLevel = Math.floor(this.indent.length / 2);
+    this.isMergeDirective = this.isMergeTag();
+  }
+
+  isMergeTag() {
+    const content = this.content.trim();
+
+    if (content === &apos;merge:&apos; || content === &apos;$&lt;&lt;:&apos;) {
+      return true;
+    }
+
+    if (content.includes(&apos;${file(&apos;)) {
+      return (
+        content.startsWith(&apos;merge:&apos;) ||
+        content.startsWith(&apos;$&lt;&lt;:&apos;) ||
+        content.startsWith(&apos;- &apos;)
+      );
+    }
+
+    return false;
+  }
+
+  getFileReference() {
+    const content = this.content.replace(/^(merge:|$&lt;&lt;:|\s*-\s*)/, &apos;&apos;).trim();
+    if (content.startsWith(&apos;${file(&apos;)) {
+      return content;
+    }
+    return null;
+  }
+
+  calculateIndent(line) {
+    const match = line.match(/^(\s*)/);
+    return match ? match[0] : &apos;&apos;;
+  }
+
+  extractKey(content) {
+    if (this.isEmpty || this.isComment) return null;
+    const match = content.match(/^([^:]+):/);
+    return match ? match[1].trim() : null;
+  }
+
+  isCapitalizedKey() {
+    return this.key &amp;&amp; /^[A-Z]/.test(this.key);
+  }
+
+  clone(newIndent = null) {
+    const line = new YamlLine(this.raw);
+    if (newIndent !== null) {
+      line.raw = newIndent + this.raw.trimLeft();
+      line.indent = newIndent;
+      line.indentLevel = Math.floor(newIndent.length / 2);
+    }
+    return line;
+  }
+}
+
+class YamlDocument {
+  constructor(filePath, options = {}) {
+    this.filePath = filePath;
+    this.baseDir = path.dirname(filePath);
+    this.lines = [];
+    this.processedFiles = new Set();
+    this.options = options;
+    this.logger = options.logger || new Logger();
+    this.schema = options.schema || CLOUDFORMATION_SCHEMA;
+    this.preserveFormat = options.preserveFormat !== false;
+    this.originalContent = null;
+    this.parsedContent = null;
+    this.parentDocument = options.parentDocument || null;
+    this.currentIndentLevel = 0;
+    this.sectionStack = [];
+  }
+
+  async load() {
+    try {
+      if (this.processedFiles.has(this.filePath)) {
+        throw new YamlMergeError(&apos;Circular reference detected&apos;, this.filePath);
+      }
+
+      this.processedFiles.add(this.filePath);
+      this.originalContent = fs.readFileSync(this.filePath, &apos;utf8&apos;);
+      this.lines = this.originalContent.split(/\r?\n/).map(line =&gt; new YamlLine(line));
+      this.parsedContent = yaml.load(this.originalContent, { schema: this.schema });
+    } catch (error) {
+      throw new YamlMergeError(
+        error instanceof YamlMergeError ? error.message : &apos;File loading error&apos;,
+        this.filePath,
+        error
+      );
+    }
+  }
+
+  resolveFilePath(relativePath) {
+    const searchPaths = [
+      path.isAbsolute(relativePath) ? relativePath : null,
+      path.resolve(this.baseDir, relativePath),
+      path.resolve(this.baseDir, &apos;..&apos;, relativePath),
+      path.resolve(process.cwd(), relativePath),
+      ...[&apos;serverless&apos;, &apos;src&apos;, &apos;config&apos;].map(dir =&gt;
+        path.resolve(process.cwd(), dir, relativePath)
+      )
+    ].filter(Boolean);
+
+    for (const searchPath of searchPaths) {
+      if (fs.existsSync(searchPath)) {
+        return searchPath;
+      }
+    }
+
+    throw new YamlMergeError(
+      `Cannot resolve file path: ${relativePath}`,
+      this.filePath
+    );
+  }
+
+
+  extractSection(lines, sectionPath) {
+    const sections = sectionPath.split(&apos;.&apos;);
+    let sectionLines = [];
+    let currentSection = sections[0];
+    let inSection = false;
+    let sectionIndent = &apos;&apos;;
+
+    for (const line of lines) {
+      if (line.key === currentSection) {
+        inSection = true;
+        sectionIndent = line.indent;
+        continue;
+      }
+
+      if (inSection) {
+        if (!line.isEmpty &amp;&amp; !line.isComment &amp;&amp; line.indent.length &lt;= sectionIndent.length) {
+          break;
+        }
+        sectionLines.push(line);
+      }
+    }
+
+    return sectionLines;
+  }
+
+  async processMerge(fileRef, parentIndent = &apos;&apos;) {
+    const resolvedPath = this.resolveFilePath(fileRef.path);
+    const subDocument = new YamlDocument(resolvedPath, {
+      ...this.options,
+      parentDocument: this
+    });
+
+    await subDocument.load();
+    await subDocument.merge();
+
+    let mergedLines = fileRef.section ?
+      this.extractSection(subDocument.lines, fileRef.section) :
+      subDocument.lines;
+
+    let lastLineEmpty = false;
+
+    return mergedLines.filter(line =&gt; {
+      if (line.isEmpty) {
+        if (lastLineEmpty) return false;
+        lastLineEmpty = true;
+        return true;
+      }
+      lastLineEmpty = false;
+      return true;
+    }).map(line =&gt; {
+      if (line.isEmpty || line.isComment) return line.clone();
+
+      if (fileRef.section &amp;&amp; line.indent.length &gt; 0) {
+        let newIndent = parentIndent;
+        if (line.indent.length &gt; 0) {
+          newIndent = parentIndent.slice(0, -2);
+        }
+        return line.clone(newIndent + line.indent);
+      }
+
+      if (fileRef.section === line.key &amp;&amp; line.isCapitalizedKey()) {
+        return line.clone(parentIndent);
+      }
+
+      const newIndent = line.isList ?
+        parentIndent + line.indent :
+        parentIndent + &apos;  &apos;.repeat(line.indentLevel);
+
+      return line.clone(newIndent);
+    });
+  }
+
+  async merge() {
+    const mergedLines = [];
+    let lastLineEmpty = false;
+
+    for (let i = 0; i &lt; this.lines.length; i++) {
+      const line = this.lines[i];
+
+      if (line.isEmpty) {
+        if (!lastLineEmpty) mergedLines.push(line);
+        lastLineEmpty = true;
+        continue;
+      } else if (line.isComment) {
+        mergedLines.push(line);
+        lastLineEmpty = false;
+        continue;
+      }
+
+      lastLineEmpty = false;
+
+      if (line.isMergeDirective) {
+        const fileRef = this.parseFileReference(line.content);
+        if (fileRef) {
+          const mergedContent = await this.processMerge(fileRef, line.indent);
+          mergedLines.push(...mergedContent);
+          continue;
+        }
+      }
+
+      if (!line.isMergeDirective) {
+        mergedLines.push(line);
+      }
+    }
+
+    this.lines = mergedLines;
+    return this;
+  }
+
+  parseFileReference(content) {
+    content = content.replace(/^($&lt;&lt;:|merge:|\s*-\s*)/, &apos;&apos;).trim();
+
+    const match = content.match(/\$\{file\(([^)]+)\)(?::([^}]+))?\}/);
+    return match ? {
+      path: match[1],
+      section: match[2],
+      raw: match[0]
+    } : null;
+  }
+
+  toString() {
+    return this.lines.map(line =&gt; line.raw).join(EOL) + EOL;
+  }
+}
+
+class YamlMerger {
+  constructor(options = {}) {
+    this.options = {
+      schema: CLOUDFORMATION_SCHEMA,
+      preserveFormat: true,
+      logLevel: &apos;info&apos;,
+      ...options
+    };
+    this.logger = new Logger(this.options.logLevel);
+    this.backupDir = &apos;.backup&apos;;
+    this.backupPath = path.join(this.backupDir, &apos;serverless-backup.yml&apos;);
+  }
+
+
+  async process(inputFile, outputFile = null) {
+    try {
+      this.logger.info(`Processing: ${inputFile}`);
+
+      // Create backup directory if doesn&apos;t exist
+      if (!fs.existsSync(this.backupDir)) {
+        fs.mkdirSync(this.backupDir, { recursive: true });
+      }
+
+      // Backup original serverless.yml
+      if (fs.existsSync(inputFile)) {
+        fs.copyFileSync(inputFile, this.backupPath);
+        this.logger.info(&apos;Original file backed up to .backup/serverless-backup.yml&apos;);
+      }
+
+      // Load and merge YAML content
+      const document = new YamlDocument(inputFile, {
+        ...this.options,
+        logger: this.logger
+      });
+
+      await document.load();
+      await document.merge();
+
+      // Write merged content
+      const outputPath = outputFile || inputFile;
+      fs.writeFileSync(outputPath, document.toString());
+
+      this.logger.info(&apos;Merge completed successfully&apos;);
+      return true;
+    } catch (error) {
+      this.logger.error(&apos;Merge failed:&apos;, error.message);
+      if (!outputFile) {
+        await this.restore(inputFile);
+      }
+      throw error;
+    }
+  }
+
+  async restore(originalFile) {
+    try {
+      if (fs.existsSync(this.backupPath)) {
+        this.logger.info(&apos;Restoring original serverless.yml&apos;);
+        fs.copyFileSync(this.backupPath, originalFile);
+
+        // Check if backup directory contains only our backup file
+        const files = fs.readdirSync(this.backupDir);
+        if (files.length === 1 &amp;&amp; files[0] === &apos;serverless-backup.yml&apos;) {
+          // Remove the entire backup directory
+          fs.rmSync(this.backupDir, { recursive: true, force: true });
+          this.logger.info(&apos;Backup directory removed&apos;);
+        } else {
+          // Just remove our backup file
+          fs.unlinkSync(this.backupPath);
+          this.logger.info(&apos;Backup file removed&apos;);
+        }
+
+        this.logger.info(&apos;Restore completed&apos;);
+      }
+    } catch (error) {
+      this.logger.error(&apos;Restore failed:&apos;, error.message);
+    }
+  }
+}
+
+async function main() {
+  const argv = parseArgs(process.argv.slice(2), {
+    boolean: [&apos;restore&apos;],
+    string: [&apos;input&apos;, &apos;log-level&apos;],
+    alias: { i: &apos;input&apos;, l: &apos;log-level&apos; },
+    default: {
+      input: &apos;serverless.yml&apos;,
+      &apos;log-level&apos;: &apos;info&apos;,
+      restore: false
+    }
+  });
+
+  const merger = new YamlMerger({ logLevel: argv[&apos;log-level&apos;] });
+
+  try {
+    if (argv.restore) {
+      await merger.restore(argv.input);
+    } else {
+      await merger.process(argv.input);
+    }
+  } catch (error) {
+    process.exit(1);
+  }
+
+  // Add SIGINT handler for cleanup
+  process.on(&apos;SIGINT&apos;, async () =&gt; {
+    await merger.restore(argv.input);
+    process.exit();
+  });
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { YamlMerger, YamlDocument, YamlLine, YamlMergeError, Logger };
+</merge_js>
+    </src>
+    <test>
+        <subymls>
+            <custom>
+                <base_yml>tableName: users-table
+apiKey: default-key
+</base_yml>
+                <stage_yml>stage-var: dev
+customData: data
+</stage_yml>
+            </custom>
+            <functions>
+                <api_yml>api:
+  handler: src/api.handler
+  events:
+    - http:
+        path: /api
+        method: get
+</api_yml>
+                <auth_yml>handler: src/auth.handler
+events:
+  - http:
+      path: /auth
+      method: post
+</auth_yml>
+            </functions>
+            <functions_yml>auth:
+  merge: ${file(functions/auth.yml)}
+
+merge: ${file(functions/api.yml)}
+</functions_yml>
+            <provider_yml>name: aws
+runtime: nodejs18.x
+region: eu-west-1
+environment:
+  STAGE: ${opt:stage, &apos;dev&apos;}
+</provider_yml>
+            <resources_yml>Resources:
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:custom.tableName}
+
+outputs:
+  TableName:
+    Value: ${self:custom.tableName}
+</resources_yml>
+        </subymls>
+        <serverless_yml>service: test-service
+
+provider:
+  merge: ${file(./subymls/provider.yml)}
+
+functions:
+  merge: ${file(./subymls/functions.yml)}
+
+custom:
+  merge:
+    - ${file(./subymls/custom/base.yml)}
+    - ${file(./subymls/custom/stage.yml)}
+
+resources:
+  Resources:
+    merge: ${file(./subymls/resources.yml):Resources}
+
+  Outputs:
+    $&lt;&lt;: ${file(./subymls/resources.yml):outputs}
+</serverless_yml>
+    </test>
+    <_gitignore>node_modules/
+coverage/
+.nyc_output/
+*.log
+.DS_Store
+.idea/
+.vscode/
+dist/
+.serverless/
+.output/
+serverless-merged.yml
+</_gitignore>
+    <_npmignore>.git
+.github
+.gitignore
+.editorconfig
+test/
+*.test.js
+coverage/
+.nyc_output/
+node_modules/
+</_npmignore>
+    <LICENSE>MIT License
+
+Copyright (c) 2025 SmartFingerGameStudio
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</LICENSE>
+    <package_lock_json>{
+  &quot;name&quot;: &quot;@smartfingerstudio/serverless-merge&quot;,
+  &quot;version&quot;: &quot;1.0.0&quot;,
+  &quot;lockfileVersion&quot;: 3,
+  &quot;requires&quot;: true,
+  &quot;packages&quot;: {
+    &quot;&quot;: {
+      &quot;name&quot;: &quot;@smartfingerstudio/serverless-merge&quot;,
+      &quot;version&quot;: &quot;1.0.0&quot;,
+      &quot;license&quot;: &quot;MIT&quot;,
+      &quot;dependencies&quot;: {
+        &quot;js-yaml&quot;: &quot;^4.1.0&quot;,
+        &quot;js-yaml-cloudformation-schema&quot;: &quot;^1.0.0&quot;,
+        &quot;minimist&quot;: &quot;^1.2.5&quot;
+      },
+      &quot;bin&quot;: {
+        &quot;serverless-merge&quot;: &quot;src/merge.js&quot;,
+        &quot;slsmerge&quot;: &quot;src/merge.js&quot;
+      },
+      &quot;engines&quot;: {
+        &quot;node&quot;: &quot;&gt;=14.0.0&quot;
+      }
+    },
+    &quot;node_modules/argparse&quot;: {
+      &quot;version&quot;: &quot;2.0.1&quot;,
+      &quot;resolved&quot;: &quot;https://registry.npmjs.org/argparse/-/argparse-2.0.1.tgz&quot;,
+      &quot;integrity&quot;: &quot;sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==&quot;
+    },
+    &quot;node_modules/esprima&quot;: {
+      &quot;version&quot;: &quot;4.0.1&quot;,
+      &quot;resolved&quot;: &quot;https://registry.npmjs.org/esprima/-/esprima-4.0.1.tgz&quot;,
+      &quot;integrity&quot;: &quot;sha512-eGuFFw7Upda+g4p+QHvnW0RyTX/SVeJBDM/gCtMARO0cLuT2HcEKnTPvhjV6aGeqrCB/sbNop0Kszm0jsaWU4A==&quot;,
+      &quot;bin&quot;: {
+        &quot;esparse&quot;: &quot;bin/esparse.js&quot;,
+        &quot;esvalidate&quot;: &quot;bin/esvalidate.js&quot;
+      },
+      &quot;engines&quot;: {
+        &quot;node&quot;: &quot;&gt;=4&quot;
+      }
+    },
+    &quot;node_modules/js-yaml&quot;: {
+      &quot;version&quot;: &quot;4.1.0&quot;,
+      &quot;resolved&quot;: &quot;https://registry.npmjs.org/js-yaml/-/js-yaml-4.1.0.tgz&quot;,
+      &quot;integrity&quot;: &quot;sha512-wpxZs9NoxZaJESJGIZTyDEaYpl0FKSA+FB9aJiyemKhMwkxQg63h4T1KJgUGHpTqPDNRcmmYLugrRjJlBtWvRA==&quot;,
+      &quot;dependencies&quot;: {
+        &quot;argparse&quot;: &quot;^2.0.1&quot;
+      },
+      &quot;bin&quot;: {
+        &quot;js-yaml&quot;: &quot;bin/js-yaml.js&quot;
+      }
+    },
+    &quot;node_modules/js-yaml-cloudformation-schema&quot;: {
+      &quot;version&quot;: &quot;1.0.0&quot;,
+      &quot;resolved&quot;: &quot;https://registry.npmjs.org/js-yaml-cloudformation-schema/-/js-yaml-cloudformation-schema-1.0.0.tgz&quot;,
+      &quot;integrity&quot;: &quot;sha512-eokVVPLsjLFuuCRQWIIaE5fX7qPUNRAAmJFXSvtzUnJcdNS0ZtAPdaFcwCrTHM+owGcBR82rlpd0b6bu8pFwQA==&quot;,
+      &quot;dependencies&quot;: {
+        &quot;js-yaml&quot;: &quot;^3.7.0&quot;
+      }
+    },
+    &quot;node_modules/js-yaml-cloudformation-schema/node_modules/argparse&quot;: {
+      &quot;version&quot;: &quot;1.0.10&quot;,
+      &quot;resolved&quot;: &quot;https://registry.npmjs.org/argparse/-/argparse-1.0.10.tgz&quot;,
+      &quot;integrity&quot;: &quot;sha512-o5Roy6tNG4SL/FOkCAN6RzjiakZS25RLYFrcMttJqbdd8BWrnA+fGz57iN5Pb06pvBGvl5gQ0B48dJlslXvoTg==&quot;,
+      &quot;dependencies&quot;: {
+        &quot;sprintf-js&quot;: &quot;~1.0.2&quot;
+      }
+    },
+    &quot;node_modules/js-yaml-cloudformation-schema/node_modules/js-yaml&quot;: {
+      &quot;version&quot;: &quot;3.14.1&quot;,
+      &quot;resolved&quot;: &quot;https://registry.npmjs.org/js-yaml/-/js-yaml-3.14.1.tgz&quot;,
+      &quot;integrity&quot;: &quot;sha512-okMH7OXXJ7YrN9Ok3/SXrnu4iX9yOk+25nqX4imS2npuvTYDmo/QEZoqwZkYaIDk3jVvBOTOIEgEhaLOynBS9g==&quot;,
+      &quot;dependencies&quot;: {
+        &quot;argparse&quot;: &quot;^1.0.7&quot;,
+        &quot;esprima&quot;: &quot;^4.0.0&quot;
+      },
+      &quot;bin&quot;: {
+        &quot;js-yaml&quot;: &quot;bin/js-yaml.js&quot;
+      }
+    },
+    &quot;node_modules/minimist&quot;: {
+      &quot;version&quot;: &quot;1.2.8&quot;,
+      &quot;resolved&quot;: &quot;https://registry.npmjs.org/minimist/-/minimist-1.2.8.tgz&quot;,
+      &quot;integrity&quot;: &quot;sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA==&quot;,
+      &quot;funding&quot;: {
+        &quot;url&quot;: &quot;https://github.com/sponsors/ljharb&quot;
+      }
+    },
+    &quot;node_modules/sprintf-js&quot;: {
+      &quot;version&quot;: &quot;1.0.3&quot;,
+      &quot;resolved&quot;: &quot;https://registry.npmjs.org/sprintf-js/-/sprintf-js-1.0.3.tgz&quot;,
+      &quot;integrity&quot;: &quot;sha512-D9cPgkvLlV3t3IzL0D0YLvGA9Ahk4PcvVwUbN0dSGr1aP0Nrt4AEnTUbuGvquEC0mA64Gqt1fzirlRs5ibXx8g==&quot;
+    }
+  }
+}
+</package_lock_json>
+    <package_json>{
+  &quot;name&quot;: &quot;@smartfingerstudio/serverless-merge&quot;,
+  &quot;version&quot;: &quot;1.0.0&quot;,
+  &quot;description&quot;: &quot;Advanced serverless configuration merger with nested file support&quot;,
+  &quot;license&quot;: &quot;MIT&quot;,
+  &quot;repository&quot;: {
+    &quot;type&quot;: &quot;git&quot;,
+    &quot;url&quot;: &quot;git+https://github.com/smartfingerstudio/serverless-merge.git&quot;
+  },
+  &quot;keywords&quot;: [
+    &quot;serverless&quot;,
+    &quot;merge&quot;,
+    &quot;config&quot;,
+    &quot;serverless-framework&quot;,
+    &quot;yaml&quot;,
+    &quot;cloudformation&quot;,
+    &quot;aws&quot;,
+    &quot;lambda&quot;
+  ],
+  &quot;main&quot;: &quot;src/merge.js&quot;,
+  &quot;bin&quot;: {
+    &quot;serverless-merge&quot;: &quot;./src/merge.js&quot;,
+    &quot;slsmerge&quot;: &quot;./src/merge.js&quot;
+  },
+  &quot;scripts&quot;: {
+    &quot;merge:run&quot;: &quot;node src/merge.js&quot;,
+    &quot;merge:restore&quot;: &quot;node src/merge.js --restore&quot;,
+    &quot;test:merge:run&quot;: &quot;npx serverless-merge -i test/serverless.yml -o test/serverless.yml&quot;,
+    &quot;test:merge:restore&quot;: &quot;npx serverless-merge -i test/serverless.yml -o serverless.yml --restore&quot;
+  },
+  &quot;author&quot;: &quot;SmartFingerGameStudio&quot;,
+  &quot;dependencies&quot;: {
+    &quot;js-yaml&quot;: &quot;^4.1.0&quot;,
+    &quot;js-yaml-cloudformation-schema&quot;: &quot;^1.0.0&quot;,
+    &quot;minimist&quot;: &quot;^1.2.5&quot;
+  },
+  &quot;engines&quot;: {
+    &quot;node&quot;: &quot;&gt;=14.0.0&quot;
+  }
+}
+</package_json>
+    <README_md># serverless-merge
+
+Advanced serverless configuration merger with nested file support.
+
+## Features
+
+- Multiple merge strategies
+- Preserves formatting and comments
+- CloudFormation schema support
+- Simple CLI &amp; Programmatic usage
+
+## Installation
+
+```bash
+npm install --save-dev @smartfingerstudio/serverless-merge
+```
+
+## Usage Examples
+
+### Using merge: directive
+```yaml
+provider:
+  merge: ${file(config/provider.yml)}
+```
+
+### Using $&lt;&lt;: syntax
+```yaml
+custom:
+  $&lt;&lt;: ${file(config/custom.yml)}
+```
+
+### List Merging
+```yaml
+# serverless.yml
+functions:
+  merge:
+    - ${file(functions/auth.yml)}
+    - ${file(functions/api.yml)}
+
+# functions/auth.yml
+authorize:
+  handler: src/auth.handler
+
+# functions/api.yml
+getData:
+  handler: src/api.handler
+```
+
+### Section Merging
+```yaml
+resources:
+  Resources:
+    merge: ${file(resources.yml):Resources}
+  Outputs:
+    merge: ${file(resources.yml):Outputs}
+```
+
+### CLI Usage
+
+```bash
+# Direct use
+npx serverless-merge -i serverless.yml -o serverless-merged.yml
+
+# Using npm scripts
+npm run merge:run
+npm run merge:restore
+```
+
+### Programmatic Usage
+
+```javascript
+const { YamlMerger } = require(&apos;@smartfingerstudio/serverless-merge&apos;);
+
+async function mergeConfig() {
+  const merger = new YamlMerger({ logLevel: &apos;info&apos; });
+
+  try {
+    await merger.process(&apos;serverless.yml&apos;, &apos;serverless-merged.yml&apos;);
+    console.log(&apos;Merge completed&apos;);
+  } catch (error) {
+    console.error(&apos;Merge failed:&apos;, error);
+  }
+}
+```
+
+See `test/` directory for more usage examples.
+
+## License
+
+MIT License - see LICENSE for details
+</README_md>
+
+</Content>

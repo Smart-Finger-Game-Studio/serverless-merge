@@ -1,0 +1,85 @@
+{
+    "InstanceId": {
+        "Condition": "DoLaunchInstance",
+        "Description": "Stack Instance ID",
+        "Value": {
+            "Ref": "Box"
+        },
+        "LaunchConfig": {
+            "Fn::ImportValue": "my-import-value"
+        },
+        "UserData": {
+            "Fn::If": [
+                "DoWriteConnectionString",
+                {
+                    "Fn::Base64": {
+                        "Fn::Sub": [
+                            "#!/bin/bash -xe\ncfn-init -v --stack ${AWS::StackName} --resource Box --region ${AWS::Region}\ncfn-signal -e 0 --stack ${AWS::StackName} --resource Box --region ${AWS::Region}\n"
+                        ]
+                    }
+                }
+            ]
+        }
+    },
+    "Outputs": {
+        "Output1": {
+            "Description": "Some quoted string",
+            "Value": {
+                "Fn::Sub": [
+                    "Instance ID is ${SomeVar}",
+                    {
+                        "SomeVar": {
+                            "Ref": "InstanceId"
+                        }
+                    }
+                ]
+            }
+        },
+        "Output2": {
+            "Description": "Some unquoted string",
+            "Value": {
+                "Fn::Sub": "Instance ID is ${InstanceId}"
+            }
+        },
+        "Output3": {
+            "Description": {
+                "Fn::ImportValue": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            "My-",
+                            {
+                                "Fn::FindInMap": [
+                                    "Very",
+                                    {
+                                        "Ref": "Long"
+                                    },
+                                    "String"
+                                ]
+                            }
+                        ]
+                    ]
+                }
+            },
+            "Value": {
+                "Fn::ImportValue": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            "My-",
+                            {
+                                "Fn::FindInMap": [
+                                    "Very",
+                                    {
+                                        "Ref": "Long"
+                                    },
+                                    "String"
+                                ]
+                            }
+                        ]
+                    ]
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "@smartfinger/serverless-merge",
+  "version": "1.0.0",
+  "description": "Advanced serverless configuration merger with nested file support",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smartfingerstudio/serverless-merge.git"
+  },
+  "keywords": [
+    "serverless",
+    "merge",
+    "config",
+    "serverless-framework",
+    "yaml",
+    "cloudformation",
+    "aws",
+    "lambda"
+  ],
+  "main": "src/merge.js",
+  "bin": {
+    "serverless-merge": "./src/merge.js",
+    "slsmerge": "./src/merge.js"
+  },
+  "scripts": {
+    "merge:run": "node src/merge.js",
+    "merge:restore": "node src/merge.js --restore",
+    "test:merge:run": "npx serverless-merge -i test/serverless.yml -o test/serverless.yml",
+    "test:merge:restore": "npx serverless-merge -i test/serverless.yml -o serverless.yml --restore"
+  },
+  "author": "SmartFingerGameStudio",
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "js-yaml-cloudformation-schema": "^1.0.0",
+    "minimist": "^1.2.5"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
