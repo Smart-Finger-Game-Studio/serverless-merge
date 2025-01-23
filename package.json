@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/smartfingerstudio/serverless-merge.git"
+    "url": "git+https://github.com/Smart-Finger-Game-Studio/serverless-merge.git"
   },
   "keywords": [
     "serverless",
@@ -19,8 +19,8 @@
   ],
   "main": "src/merge.js",
   "bin": {
-    "serverless-merge": "./src/merge.js",
-    "slsmerge": "./src/merge.js"
+    "serverless-merge": "src/merge.js",
+    "slsmerge": "src/merge.js"
   },
   "scripts": {
     "merge:run": "node src/merge.js",
@@ -36,5 +36,13 @@
   },
   "engines": {
     "node": ">=14.0.0"
-  }
+  },
+  "bugs": {
+    "url": "https://github.com/Smart-Finger-Game-Studio/serverless-merge/issues"
+  },
+  "homepage": "https://github.com/Smart-Finger-Game-Studio/serverless-merge#readme",
+  "directories": {
+    "test": "test"
+  },
+  "devDependencies": {}
 }
