@@ -135,7 +135,7 @@ class YamlDocument {
       this.parsedContent = yaml.load(this.originalContent, { schema: this.schema });
     } catch (error) {
       throw new YamlMergeError(
-          error instanceof YamlMergeError ? error.message : 'File loading error',
+          error instanceof YamlMergeError ? error.message : error+ 'File loading error',
           this.filePath,
           error
       );
@@ -190,7 +190,6 @@ class YamlDocument {
 
     return sectionLines;
   }
-
   async processMerge(fileRef, parentIndent = '') {
     const resolvedPath = this.resolveFilePath(fileRef.path);
     const subDocument = new YamlDocument(resolvedPath, {
@@ -205,39 +204,77 @@ class YamlDocument {
         this.extractSection(subDocument.lines, fileRef.section) :
         subDocument.lines;
 
-    let lastLineEmpty = false;
-
-    return mergedLines.filter(line => {
-      if (line.isEmpty) {
-        if (lastLineEmpty) return false;
-        lastLineEmpty = true;
+    if (fileRef.section && fileRef.section.match(/^[A-Z]/)) {
+      let lastLineEmpty = false;
+      mergedLines = mergedLines.filter(line => {
+        if (line.isEmpty) {
+          if (lastLineEmpty) return false;
+          lastLineEmpty = true;
+          return true;
+        }
+        lastLineEmpty = false;
         return true;
-      }
-      lastLineEmpty = false;
-      return true;
-    }).map(line => {
+      });
+    }
+
+    else {
+      mergedLines = mergedLines.filter((line, index, arr) => {
+        if (line.isEmpty) {
+          return !(index > 0 && index < arr.length - 1 &&
+              !arr[index - 1].isEmpty && !arr[index + 1].isEmpty);
+        }
+        return true;
+      });
+    }
+
+    return mergedLines.map(line => {
       if (line.isEmpty || line.isComment) return line.clone();
 
-      if (fileRef.section && line.indent.length > 0) {
-        let newIndent = parentIndent;
-        if (line.indent.length > 0) {
-          newIndent = parentIndent.slice(0, -2);
+      if (fileRef.section) {
+        if (fileRef.section.match(/^[A-Z]/)) {
+          if (line.indent.length > 0) {
+            let newIndent = parentIndent;
+            if (line.indent.length > 0) {
+              newIndent = parentIndent.slice(0, -2);
+            }
+            return line.clone(newIndent + line.indent);
+          }
+
+          if (fileRef.section === line.key && line.isCapitalizedKey()) {
+            return line.clone(parentIndent);
+          }
         }
-        return line.clone(newIndent + line.indent);
+
+        else {
+          if (line.key === fileRef.section) {
+            return line.clone(parentIndent);
+          }
+
+          if (fileRef.section && !fileRef.section.match(/^[A-Z]/)) {
+            return line.clone(parentIndent);
+          }
+
+          const relativeLine = line.clone(parentIndent + line.indent.slice(2));
+          return relativeLine;
+        }
       }
 
-      if (fileRef.section === line.key && line.isCapitalizedKey()) {
-        return line.clone(parentIndent);
+      if (line.isList) {
+        if (fileRef.section && fileRef.section.match(/^[A-Z]/)) {
+          return line.clone(parentIndent + line.indent);
+        }
+        else {
+          return line.clone(parentIndent + line.indent);
+        }
       }
 
-      const newIndent = line.isList ?
-          parentIndent + line.indent :
-          parentIndent + '  '.repeat(line.indentLevel);
-
-      return line.clone(newIndent);
+      if (fileRef.section && fileRef.section.match(/^[A-Z]/)) {
+        return line.clone(parentIndent + '  '.repeat(line.indentLevel));
+      } else {
+        return line.clone(parentIndent + '  '.repeat(line.indentLevel));
+      }
     });
   }
-
   async merge() {
     const mergedLines = [];
     let lastLineEmpty = false;
