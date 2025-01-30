@@ -25,8 +25,8 @@
   "scripts": {
     "merge:run": "node src/merge.js",
     "merge:restore": "node src/merge.js --restore",
-    "test:merge:run": "npx serverless-merge -i test/serverless.yml -o test/serverless-merged.yml",
-    "test:merge:restore": "npx serverless-merge -i test/serverless.yml -o test/serverless.yml --restore"
+    "test:merge:run": "npx serverless-merge -i test/serverless.yml ",
+    "test:merge:restore": "npx serverless-merge -i test/serverless.yml  --restore"
   },
   "author": "SmartFingerGameStudio",
   "dependencies": {

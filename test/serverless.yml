@@ -16,4 +16,4 @@ resources:
     merge: ${file(./subymls/resources.yml):Resources}
 
   Outputs:
-    $<<: ${file(./subymls/resources.yml):outputs}
+    merge: ${file(./subymls/resources.yml):Outputs}

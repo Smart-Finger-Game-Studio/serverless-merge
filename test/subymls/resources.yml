@@ -4,6 +4,6 @@ Resources:
     Properties:
       TableName: ${self:custom.tableName}
 
-outputs:
+Outputs:
   TableName:
     Value: ${self:custom.tableName}

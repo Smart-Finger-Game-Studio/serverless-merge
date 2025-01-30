@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
@@ -337,25 +336,52 @@ class YamlMerger {
       ...options
     };
     this.logger = new Logger(this.options.logLevel);
-    this.backupDir = '.backup';
+    this.backupDir = '.mergebackup';
     this.backupPath = path.join(this.backupDir, 'serverless-backup.yml');
   }
 
+  hasMergeDirectives(content) {
+    return content.includes('merge:') || content.includes('$<<:');
+  }
+
+  removeBackupTags(content) {
+    return content.replace(/#MergeBackup\n/g, '');
+  }
 
   async process(inputFile, outputFile = null) {
+    let isRestoreNeeded = false;
+
     try {
       this.logger.info(`Processing: ${inputFile}`);
+
+      if (!fs.existsSync(inputFile)) {
+        throw new Error(`Input file not found: ${inputFile}`);
+      }
+
+      const originalContent = fs.readFileSync(inputFile, 'utf8');
+
+      // Check for merge directives and backup
+      if (!this.hasMergeDirectives(originalContent) && fs.existsSync(this.backupPath)) {
+        const backupContent = fs.readFileSync(this.backupPath, 'utf8');
+        if (backupContent.includes('#MergeBackup')) {
+          this.logger.info('No merge directives found and valid backup exists. Restoring first...');
+          await this.restore(inputFile);
+          // After restore, try processing again with the restored file
+          return this.process(inputFile, outputFile);
+        }
+      }
 
       // Create backup directory if doesn't exist
       if (!fs.existsSync(this.backupDir)) {
         fs.mkdirSync(this.backupDir, { recursive: true });
       }
 
-      // Backup original serverless.yml
-      if (fs.existsSync(inputFile)) {
-        fs.copyFileSync(inputFile, this.backupPath);
-        this.logger.info('Original file backed up to .backup/serverless-backup.yml');
-      }
+      // Create backup with #MergeBackup tag
+      const cleanContent = this.removeBackupTags(originalContent);
+      const contentToBackup = '#MergeBackup\n' + cleanContent;
+      fs.writeFileSync(this.backupPath, contentToBackup);
+      this.logger.info('Original file backed up to .mergebackup/serverless-backup.yml');
+      isRestoreNeeded = true;
 
       // Load and merge YAML content
       const document = new YamlDocument(inputFile, {
@@ -372,10 +398,16 @@ class YamlMerger {
 
       this.logger.info('Merge completed successfully');
       return true;
+
     } catch (error) {
       this.logger.error('Merge failed:', error.message);
-      if (!outputFile) {
-        await this.restore(inputFile);
+      if (isRestoreNeeded && !outputFile) {
+        try {
+          await this.restore(inputFile);
+        } catch (restoreError) {
+          this.logger.error('Restore after merge failure also failed:', restoreError.message);
+          throw restoreError;
+        }
       }
       throw error;
     }
@@ -384,25 +416,38 @@ class YamlMerger {
   async restore(originalFile) {
     try {
       if (fs.existsSync(this.backupPath)) {
-        this.logger.info('Restoring original serverless.yml');
-        fs.copyFileSync(this.backupPath, originalFile);
+        const backupContent = fs.readFileSync(this.backupPath, 'utf8');
 
-        // Check if backup directory contains only our backup file
-        const files = fs.readdirSync(this.backupDir);
-        if (files.length === 1 && files[0] === 'serverless-backup.yml') {
-          // Remove the entire backup directory
-          fs.rmSync(this.backupDir, { recursive: true, force: true });
-          this.logger.info('Backup directory removed');
+        // Only restore if the file has the backup tag
+        if (backupContent.includes('#MergeBackup')) {
+          this.logger.info('Restoring original serverless.yml');
+          // Remove all backup tags before restoring
+          const contentToRestore = this.removeBackupTags(backupContent);
+          fs.writeFileSync(originalFile, contentToRestore);
+
+          // Check if backup directory contains only our backup file
+          const files = fs.readdirSync(this.backupDir);
+          if (files.length === 1 && files[0] === 'serverless-backup.yml') {
+            // Remove the entire backup directory
+            fs.rmSync(this.backupDir, { recursive: true, force: true });
+            this.logger.info('Backup directory removed');
+          } else {
+            // Just remove our backup file
+            fs.unlinkSync(this.backupPath);
+            this.logger.info('Backup file removed');
+          }
+
+          this.logger.info('Restore completed');
+          return true;
         } else {
-          // Just remove our backup file
-          fs.unlinkSync(this.backupPath);
-          this.logger.info('Backup file removed');
+          this.logger.warn('Backup file exists but does not have backup tag. Skipping restore.');
+          return false;
         }
-
-        this.logger.info('Restore completed');
       }
+      return false;
     } catch (error) {
       this.logger.error('Restore failed:', error.message);
+      throw error;
     }
   }
 }
