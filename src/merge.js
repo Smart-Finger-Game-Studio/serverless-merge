@@ -337,54 +337,171 @@ class YamlMerger {
     };
     this.logger = new Logger(this.options.logLevel);
     this.backupDir = '.mergebackup';
-    this.backupPath = path.join(this.backupDir, 'serverless-backup.yml');
+  }
+
+
+  // Yeni yardımcı method - Yapılandırma dosyasını bulur
+  findConfigFile(inputFile) {
+    // Özel dosya belirtilmişse önce onu kontrol et
+    if (inputFile && fs.existsSync(inputFile)) {
+      return inputFile;
+    }
+
+    // Varsayılan dosyaları sırayla kontrol et
+    const defaultFiles = [
+      'serverless.yml',
+      'serverless.yaml',
+      'template.yml',
+      'template.yaml'
+    ];
+
+    for (const file of defaultFiles) {
+      if (fs.existsSync(file)) {
+        this.logger.info(`Found configuration file: ${file}`);
+        return file;
+      }
+    }
+
+    throw new Error('No valid configuration file found');
+  }
+
+  getBackupPath(inputFile) {
+    const fileName = path.basename(inputFile);
+    const backupName = `${path.parse(fileName).name}-backup${path.parse(fileName).ext}`;
+    const backupPath = path.join(this.backupDir, backupName);
+
+    // Eğer backup dosyası varsa yolunu döndür
+    if (fs.existsSync(backupPath)) {
+      return backupPath;
+    }
+
+    // Backup bulunamadıysa null döndür
+    return null;
   }
 
   hasMergeDirectives(content) {
-    return content.includes('merge:') || content.includes('$<<:');
+    return content.includes('merge:') || content.includes('$<<:') || content.includes('merge:pack');
   }
 
   removeBackupTags(content) {
     return content.replace(/#MergeBackup\n/g, '');
   }
 
-  async process(inputFile, outputFile = null) {
+
+  async restore(inputFile = null) {
+    try {
+      const configFile = this.findConfigFile(inputFile);
+      const backupPath = this.getBackupPath(configFile);
+
+      if (!backupPath) {
+        this.logger.warn(`No backup found for ${configFile}`);
+        return false;
+      }
+
+      const backupContent = fs.readFileSync(backupPath, 'utf8');
+
+      if (backupContent.includes('#MergeBackup')) {
+        this.logger.info(`Restoring original ${configFile}`);
+        const contentToRestore = this.removeBackupTags(backupContent);
+        fs.writeFileSync(configFile, contentToRestore);
+        fs.unlinkSync(backupPath);
+        this.logger.info('Backup file removed');
+        this.cleanBackupDirectory();
+        this.logger.info('Restore completed');
+        return true;
+      } else {
+        this.logger.warn('Backup file exists but does not have backup tag. Skipping restore.');
+        return false;
+      }
+    } catch (error) {
+      this.logger.error('Restore failed:', error.message);
+      throw error;
+    }
+  }
+
+  findYamlFiles(directory) {
+    const yamlFiles = [];
+    const files = fs.readdirSync(directory);
+
+    files.forEach(file => {
+      const filePath = path.join(directory, file);
+      const stats = fs.statSync(filePath);
+
+      if (stats.isFile() &&
+          (file.endsWith('.yml') || file.endsWith('.yaml')) &&
+          !file.includes('-backup')) {
+        yamlFiles.push(path.normalize(filePath));
+      }
+    });
+
+    return yamlFiles;
+  }
+
+  cleanBackupDirectory() {
+    if (fs.existsSync(this.backupDir)) {
+      const files = fs.readdirSync(this.backupDir);
+      if (files.length === 0) {
+        fs.rmdirSync(this.backupDir);
+        this.logger.info('Empty backup directory removed');
+      }
+    }
+  }
+
+
+  handleBulkError(operation, filePath, error) {
+    this.logger.error(`${operation} failed for ${filePath}:`, error.message);
+    return {
+      file: filePath,
+      success: false,
+      error: error.message
+    };
+  }
+
+  async process(inputFile = null, outputFile = null) {
     let isRestoreNeeded = false;
 
     try {
-      this.logger.info(`Processing: ${inputFile}`);
-
-      if (!fs.existsSync(inputFile)) {
-        throw new Error(`Input file not found: ${inputFile}`);
+      if (!inputFile) {
+        throw new Error('Input file is required');
       }
 
-      const originalContent = fs.readFileSync(inputFile, 'utf8');
+      // Dosya yolunu normalize et
+      const normalizedPath = path.normalize(inputFile);
 
-      // Check for merge directives and backup
-      if (!this.hasMergeDirectives(originalContent) && fs.existsSync(this.backupPath)) {
-        const backupContent = fs.readFileSync(this.backupPath, 'utf8');
+      this.logger.info(`Processing: ${normalizedPath}`);
+
+      if (!fs.existsSync(normalizedPath)) {
+        throw new Error(`Input file not found: ${normalizedPath}`);
+      }
+
+      // Backup path oluştur
+      const backupPath = path.join(this.backupDir, `${path.basename(normalizedPath, path.extname(normalizedPath))}-backup${path.extname(normalizedPath)}`);
+      const originalContent = fs.readFileSync(normalizedPath, 'utf8');
+
+      // Merge yönergelerini ve yedeği kontrol et
+      if (!this.hasMergeDirectives(originalContent) && fs.existsSync(backupPath)) {
+        const backupContent = fs.readFileSync(backupPath, 'utf8');
         if (backupContent.includes('#MergeBackup')) {
           this.logger.info('No merge directives found and valid backup exists. Restoring first...');
-          await this.restore(inputFile);
-          // After restore, try processing again with the restored file
-          return this.process(inputFile, outputFile);
+          await this.restore(normalizedPath);
+          return this.process(normalizedPath, outputFile);
         }
       }
 
-      // Create backup directory if doesn't exist
+      // Yedek dizini yoksa oluştur
       if (!fs.existsSync(this.backupDir)) {
         fs.mkdirSync(this.backupDir, { recursive: true });
       }
 
-      // Create backup with #MergeBackup tag
+      // MergeBackup tag'i ile yedek oluştur
       const cleanContent = this.removeBackupTags(originalContent);
       const contentToBackup = '#MergeBackup\n' + cleanContent;
-      fs.writeFileSync(this.backupPath, contentToBackup);
-      this.logger.info('Original file backed up to .mergebackup/serverless-backup.yml');
+      fs.writeFileSync(backupPath, contentToBackup);
+      this.logger.info(`Original file backed up to ${backupPath}`);
       isRestoreNeeded = true;
 
-      // Load and merge YAML content
-      const document = new YamlDocument(inputFile, {
+      // YAML içeriğini yükle ve birleştir
+      const document = new YamlDocument(normalizedPath, {
         ...this.options,
         logger: this.logger
       });
@@ -392,8 +509,8 @@ class YamlMerger {
       await document.load();
       await document.merge();
 
-      // Write merged content
-      const outputPath = outputFile || inputFile;
+      // Birleştirilmiş içeriği yaz
+      const outputPath = outputFile || normalizedPath;
       fs.writeFileSync(outputPath, document.toString());
 
       this.logger.info('Merge completed successfully');
@@ -413,74 +530,189 @@ class YamlMerger {
     }
   }
 
-  async restore(originalFile) {
+  async bulkProcess(directory = null, pattern = null) {
+    const results = [];
+    let files = new Set();
+
     try {
-      if (fs.existsSync(this.backupPath)) {
-        const backupContent = fs.readFileSync(this.backupPath, 'utf8');
-
-        // Only restore if the file has the backup tag
-        if (backupContent.includes('#MergeBackup')) {
-          this.logger.info('Restoring original serverless.yml');
-          // Remove all backup tags before restoring
-          const contentToRestore = this.removeBackupTags(backupContent);
-          fs.writeFileSync(originalFile, contentToRestore);
-
-          // Check if backup directory contains only our backup file
-          const files = fs.readdirSync(this.backupDir);
-          if (files.length === 1 && files[0] === 'serverless-backup.yml') {
-            // Remove the entire backup directory
-            fs.rmSync(this.backupDir, { recursive: true, force: true });
-            this.logger.info('Backup directory removed');
+      if (directory) {
+        const normalizedDir = path.normalize(directory);
+        if (fs.existsSync(normalizedDir)) {
+          if (fs.statSync(normalizedDir).isDirectory()) {
+            // Dizin ise içindeki yaml dosyalarını bul
+            const dirFiles = this.findYamlFiles(normalizedDir);
+            dirFiles.forEach(file => files.add(file));
           } else {
-            // Just remove our backup file
-            fs.unlinkSync(this.backupPath);
-            this.logger.info('Backup file removed');
+            // Tek dosya ise direkt ekle
+            files.add(normalizedDir);
           }
-
-          this.logger.info('Restore completed');
-          return true;
-        } else {
-          this.logger.warn('Backup file exists but does not have backup tag. Skipping restore.');
-          return false;
         }
       }
-      return false;
+
+      if (pattern) {
+        const glob = require('glob');
+        const matchedFiles = glob.sync(pattern, { cwd: process.cwd(), absolute: true });
+        matchedFiles.forEach(file => files.add(path.normalize(file)));
+      }
+
+      const fileArray = Array.from(files);
+      if (fileArray.length === 0) {
+        this.logger.warn('No YAML files found for processing');
+        return [];
+      }
+
+      this.logger.info(`Starting bulk process for ${fileArray.length} files`);
+
+      for (const file of fileArray) {
+        try {
+          await this.process(file);
+          results.push({
+            file,
+            success: true
+          });
+          this.logger.info(`Successfully processed: ${file}`);
+        } catch (error) {
+          results.push(this.handleBulkError('Process', file, error));
+        }
+      }
+
+      const successCount = results.filter(r => r.success).length;
+      this.logger.info(`Bulk process completed. Success: ${successCount}/${fileArray.length}`);
+
+      return results;
     } catch (error) {
-      this.logger.error('Restore failed:', error.message);
+      this.logger.error('Bulk process operation failed:', error.message);
       throw error;
     }
   }
+
+
+
+  async bulkRestore(directory = null, pattern = null) {
+    const results = [];
+    let files = new Set();
+
+    try {
+      if (directory) {
+        if (fs.statSync(directory).isDirectory()) {
+          // Dizin ise backup dosyalarını kontrol et
+          if (fs.existsSync(this.backupDir)) {
+            const backupFiles = fs.readdirSync(this.backupDir)
+                .filter(file => file.endsWith('-backup.yml') || file.endsWith('-backup.yaml'));
+
+            backupFiles.forEach(backupFile => {
+              const originalName = backupFile.replace('-backup', '');
+              const filePath = path.join(directory, originalName);
+              if (fs.existsSync(filePath)) {
+                files.add(filePath);
+              }
+            });
+          }
+        } else {
+          // Tek dosya ise direkt ekle
+          files.add(directory);
+        }
+      }
+
+      if (pattern) {
+        const glob = require('glob');
+        const matchedFiles = glob.sync(pattern);
+        matchedFiles.forEach(file => files.add(file));
+      }
+
+      const fileArray = Array.from(files);
+      if (fileArray.length === 0) {
+        this.logger.warn('No files found for restore');
+        return [];
+      }
+
+      this.logger.info(`Starting bulk restore for ${fileArray.length} files`);
+
+      for (const file of fileArray) {
+        try {
+          const success = await this.restore(file);
+          results.push({
+            file,
+            success
+          });
+          if (success) {
+            this.logger.info(`Successfully restored: ${file}`);
+          }
+        } catch (error) {
+          results.push(this.handleBulkError('Restore', file, error));
+        }
+      }
+
+      const successCount = results.filter(r => r.success).length;
+      this.logger.info(`Bulk restore completed. Success: ${successCount}/${fileArray.length}`);
+
+      this.cleanBackupDirectory();
+
+      return results;
+    } catch (error) {
+      this.logger.error('Bulk restore operation failed:', error.message);
+      throw error;
+    }
+  }
+
 }
 
 async function main() {
   const argv = parseArgs(process.argv.slice(2), {
-    boolean: ['restore'],
-    string: ['input', 'log-level'],
-    alias: { i: 'input', l: 'log-level' },
+    boolean: ['restore', 'bulk'],
+    string: ['input', 'log-level', 'pattern'],
+    alias: {
+      i: 'input',
+      l: 'log-level',
+      b: 'bulk',
+      p: 'pattern'
+    },
     default: {
-      input: 'serverless.yml',
       'log-level': 'info',
-      restore: false
+      restore: false,
+      bulk: false
     }
   });
 
   const merger = new YamlMerger({ logLevel: argv['log-level'] });
 
   try {
-    if (argv.restore) {
-      await merger.restore(argv.input);
+    // input parametrelerini array'e çevir
+    let inputs = [];
+    if (Array.isArray(argv.input)) {
+      inputs = argv.input;
+    } else if (argv.input) {
+      inputs = [argv.input];
+    }
+
+    if (argv.bulk) {
+      if (argv.restore) {
+        // Her input için bulk restore yap
+        for (const input of inputs) {
+          await merger.bulkRestore(input, argv.pattern);
+        }
+      } else {
+        // Her input için bulk process yap
+        for (const input of inputs) {
+          await merger.bulkProcess(input, argv.pattern);
+        }
+      }
     } else {
-      await merger.process(argv.input);
+      // Tekil işlemler için
+      if (argv.restore) {
+        for (const input of inputs) {
+          await merger.restore(input);
+        }
+      } else {
+        for (const input of inputs) {
+          await merger.process(input);
+        }
+      }
     }
   } catch (error) {
+    console.error(error.message);
     process.exit(1);
   }
-
-  // Add SIGINT handler for cleanup
-  process.on('SIGINT', async () => {
-    await merger.restore(argv.input);
-    process.exit();
-  });
 }
 
 if (require.main === module) {
